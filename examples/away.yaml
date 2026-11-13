@@ -17,5 +17,4 @@ use_blueprint:
       - armed_away
       - armed_home
     cooldown: 60
-    cooldown_store: input_text.frigate_cooldown
     silence_timer: timer.frigate_silence

@@ -11,8 +11,8 @@ blueprint:
     One alert with sound when a review first matches your filters, then silent updates
     of the same notification (new object type, review end, GenAI summary). An optional
     per-camera cooldown keeps a busy camera from sounding over and over.
-    Each MQTT message is handled on its own, so nothing waits in the background and a
-    Home Assistant restart mid-review loses nothing.
+    Each MQTT message is handled on its own, so a Home Assistant restart mid-review
+    loses nothing.
 
     Needs Frigate 0.14+, the Frigate integration with the unauthenticated notification
     proxy enabled, and MQTT.
@@ -167,8 +167,7 @@ blueprint:
           name: Cooldown per camera
           description: >-
             After an alert with sound, new reviews on the same camera arrive silently
-            for this long. Other cameras are not affected. 0 turns it off. Needs the
-            text helper below.
+            for this long. Other cameras are not affected. 0 turns it off.
           default: 0
           selector:
             number:
@@ -176,16 +175,6 @@ blueprint:
               max: 3600
               unit_of_measurement: s
               mode: box
-        cooldown_store:
-          name: Cooldown text helper
-          description: >-
-            A Text helper (input_text) that remembers when each camera last alerted. Set
-            its maximum length to 255. Automations that share a helper share the cooldown.
-          default: ""
-          selector:
-            entity:
-              filter:
-                - domain: input_text
     silence:
       name: Silence button
       icon: mdi:bell-off
@@ -227,9 +216,8 @@ blueprint:
           selector:
             text: {}
 
-mode: queued
-max: 20
-max_exceeded: silent
+mode: parallel
+max: 100
 trace:
   stored_traces: 20
 
@@ -337,6 +325,27 @@ actions:
             data:
               duration: "{{ silence_minutes | int * 60 }}"
     default:
+      # Cooldown: a run that alerted with sound stays alive for the cooldown and
+      # answers runs that ask about its camera. No answer means not cooling down.
+      - variables:
+          cooldown: !input cooldown
+          cooldown_key: "{{ this.entity_id }}/{{ camera }}"
+          ask_cooldown: "{{ kind == 'alert' and cooldown | float(0) > 0 }}"
+          alert_time: "{{ now().timestamp() }}"
+      - if:
+          - condition: template
+            value_template: "{{ ask_cooldown }}"
+        then:
+          - event: frigate_review_notify_cooldown
+            event_data:
+              ask: "{{ cooldown_key }}"
+      - wait_for_trigger:
+          - trigger: event
+            event_type: frigate_review_notify_cooldown
+            event_data:
+              cooling: "{{ cooldown_key }}"
+        timeout:
+          milliseconds: "{{ 200 if ask_cooldown else 0 }}"
       - variables:
           input_base_url: !input base_url
           base_url: "{{ input_base_url.rstrip('/') }}"
@@ -358,21 +367,7 @@ actions:
           genai_threat_level: >-
             {% set meta = trigger.payload_json['after']['data'].get('metadata') or {} %}
             {{ meta.get('potential_threat_level') | int(0) }}
-          cooldown: !input cooldown
-          cooldown_store: !input cooldown_store
-          # Cameras still cooling down, as "camera:time of the alert" (newest first)
-          cooling: >-
-            {% set ns = namespace(items=[]) %}
-            {% if cooldown | int > 0 and cooldown_store %}
-              {% for item in states(cooldown_store).split(',') %}
-                {% set age = now().timestamp() - item.split(':')[1] | default(0) | int(0) %}
-                {% if 0 <= age < cooldown | int %}
-                  {% set ns.items = ns.items + [item] %}
-                {% endif %}
-              {% endfor %}
-            {% endif %}
-            {{ ns.items }}
-          cooled: "{{ kind == 'alert' and cooling | select('match', camera ~ ':') | list | count > 0 }}"
+          cooled: "{{ wait.trigger is not none }}"
           silent: "{{ kind != 'alert' or cooled }}"
           summary: "{{ kind == 'summary' and genai_text | string | trim | length > 0 }}"
           title_default: !input title
@@ -418,21 +413,30 @@ actions:
             # A cooled-down alert is a new notification, so alert_once can't quieten it
             channel: "{{ 'Frigate quiet' if cooled else '' }}"
             importance: "{{ 'low' if cooled else '' }}"
-      - alias: Start the cooldown for this camera
+      - alias: Hold the cooldown for this camera
         if:
           - condition: template
-            value_template: "{{ kind == 'alert' and not cooled and cooldown | int > 0 and cooldown_store | length > 0 }}"
+            value_template: "{{ ask_cooldown and not cooled }}"
         then:
-          - action: input_text.set_value
-            target:
-              entity_id: "{{ cooldown_store }}"
-            data:
-              # Drop the oldest entries if the helper is too short to hold them all
-              value: >-
-                {% set ns = namespace(items=[]) %}
-                {% for item in [camera ~ ':' ~ now().timestamp() | int] + cooling %}
-                  {% if (ns.items + [item]) | join(',') | length <= state_attr(cooldown_store, 'max') | int(100) %}
-                    {% set ns.items = ns.items + [item] %}
-                  {% endif %}
-                {% endfor %}
-                {{ ns.items | join(',') }}
+          - repeat:
+              while:
+                - condition: template
+                  value_template: "{{ now().timestamp() < alert_time + cooldown | float(0) }}"
+              sequence:
+                - wait_for_trigger:
+                    - trigger: event
+                      event_type: frigate_review_notify_cooldown
+                      event_data:
+                        ask: "{{ cooldown_key }}"
+                  timeout:
+                    seconds: "{{ [alert_time + cooldown | float(0) - now().timestamp(), 0.1] | max }}"
+                - if:
+                    - condition: template
+                      value_template: "{{ wait.trigger is not none }}"
+                  then:
+                    # Give the asking run time to start listening
+                    - delay:
+                        milliseconds: 20
+                    - event: frigate_review_notify_cooldown
+                      event_data:
+                        cooling: "{{ cooldown_key }}"

@@ -1,9 +1,11 @@
 """Behaviour of the lean Frigate review notification blueprint."""
 
+import asyncio
+
 import pytest
 from homeassistant.setup import async_setup_component
 
-from .conftest import ALARM, AWAY, STORE, TIMER
+from .conftest import ALARM, AWAY, TIMER
 
 AUTOMATION = "automation.frigate_test"
 
@@ -215,12 +217,14 @@ def sounds(calls):
     return [push(c)["sound"] for c in calls]
 
 
-async def test_cooldown_is_per_camera(hass, setup, freezer):
-    send, calls = await setup(cooldown=60, cooldown_store=STORE)
-    await send("new", rid="1.1-a")
-    freezer.tick(20)
-    await send("new", rid="2.1-b")                          # same camera, inside the window
-    await send("new", rid="3.1-c", camera="front_yard")     # another camera
+WAIT = 0.4      # longer than the 200 ms a run waits for a cooldown answer
+
+
+async def test_cooldown_is_per_camera(hass, setup):
+    send, calls = await setup(cooldown=2)
+    await send("new", rid="1.1-a", settle=WAIT)
+    await send("new", rid="2.1-b", settle=WAIT)                         # same camera, cooling down
+    await send("new", rid="3.1-c", camera="front_yard", settle=WAIT)    # another camera
     assert sounds(calls) == ["default", "none", "default"]
     quiet = calls[1].data["data"]
     assert quiet["tag"] == "frigate-2.1-b"
@@ -228,84 +232,76 @@ async def test_cooldown_is_per_camera(hass, setup, freezer):
     assert (quiet["channel"], quiet["importance"]) == ("Frigate quiet", "low")
     assert quiet["attachment"]["url"].endswith("/snapshot.jpg?crop=1")   # no preview GIF yet
     assert (calls[0].data["data"]["channel"], calls[0].data["data"]["importance"]) == ("", "")
+    assert hass.states.get(AUTOMATION).attributes["current"] == 2       # one per cooling camera
 
-    freezer.tick(45)                                        # 65 s after the first alert
-    await send("new", rid="4.1-d")
+    await asyncio.sleep(2.4)
+    assert hass.states.get(AUTOMATION).attributes["current"] == 0     # nothing left waiting
+    await send("new", rid="4.1-d", settle=WAIT)
     assert sounds(calls)[-1] == "default"
 
 
-async def test_cooldown_counts_from_the_last_alert_with_sound(hass, setup, freezer):
-    """Silent deliveries and updates do not extend the window."""
-    send, calls = await setup(cooldown=60, cooldown_store=STORE, end_update=True)
-    await send("new", rid="1.1-a")
-    freezer.tick(50)
-    await send("new", rid="2.1-b")
-    await send("update", rid="2.1-b", objects=("person", "car"), before={"objects": ("person",)})
-    await send("end", rid="2.1-b", objects=("person", "car"))
-    freezer.tick(15)
-    await send("new", rid="3.1-c")
+async def test_cooldown_counts_from_the_last_alert_with_sound(hass, setup):
+    """Silent deliveries and updates do not extend the cooldown."""
+    send, calls = await setup(cooldown=3, end_update=True)
+    await send("new", rid="1.1-a", settle=1.5)
+    await send("new", rid="2.1-b", settle=WAIT)
+    await send("update", rid="2.1-b", objects=("person", "car"), before={"objects": ("person",)}, settle=0.1)
+    await send("end", rid="2.1-b", objects=("person", "car"), settle=1.5)
+    await send("new", rid="3.1-c", settle=WAIT)                         # 3.5 s after the first alert
     assert sounds(calls) == ["default", "none", "none", "none", "default"]
 
 
-async def test_cooldown_ignores_filtered_reviews(hass, setup, freezer):
-    send, calls = await setup(cooldown=60, cooldown_store=STORE)
-    await send("new", rid="1.1-a", objects=("dog",))
+async def test_cooldown_ignores_filtered_reviews(hass, setup):
+    send, calls = await setup(cooldown=2)
+    await send("new", rid="1.1-a", objects=("dog",), settle=0.1)
     hass.states.async_set(ALARM, "disarmed")
-    await send("new", rid="2.1-b")
+    await send("new", rid="2.1-b", settle=0.1)
     hass.states.async_set(ALARM, "armed_away")
-    await send("new", rid="3.1-c")
+    await send("new", rid="3.1-c", settle=WAIT)
     assert sounds(calls) == ["default"]
 
 
-async def test_cooldown_store_holds_only_live_entries(hass, setup, freezer):
-    send, calls = await setup(cooldown=60, cooldown_store=STORE)
-    assert hass.states.get(STORE).state == "unknown"
-    await send("new", rid="1.1-a")
-    first = hass.states.get(STORE).state
-    assert first.startswith("driveway:")
-    freezer.tick(30)
-    await send("new", rid="2.1-b", camera="front_yard")
-    assert hass.states.get(STORE).state.split(",")[1] == first
-    freezer.tick(40)
-    await send("new", rid="3.1-c")
-    cams = [item.split(":")[0] for item in hass.states.get(STORE).state.split(",")]
-    assert cams == ["driveway", "front_yard"]
+async def test_cooldown_holds_many_cameras_at_once(hass, setup):
+    cams = [f"cam{i}" for i in range(30)]
+    for cam in cams:
+        hass.states.async_set(f"camera.{cam}", "idle", {"camera_name": cam})
+    send, calls = await setup({**AWAY, "cameras": [f"camera.{c}" for c in cams]}, cooldown=3)
+    for i, cam in enumerate(cams):
+        await send("new", rid=f"1.{i}-a", camera=cam, settle=0)
+    await asyncio.sleep(WAIT)
+    assert sounds(calls) == ["default"] * 30
+    for i, cam in enumerate(cams):
+        await send("new", rid=f"2.{i}-b", camera=cam, settle=0)
+    await asyncio.sleep(WAIT)
+    assert sounds(calls)[30:] == ["none"] * 30
 
 
-async def test_cooldown_helper_too_short_drops_the_oldest(hass, setup, freezer):
-    short = "input_text.short_cooldown"                     # max 30: room for one camera
-    send, calls = await setup(cooldown=60, cooldown_store=short)
-    await send("new", rid="1.1-a")
-    await send("new", rid="2.1-b", camera="front_yard")
-    assert hass.states.get(short).state.startswith("front_yard:")
-    await send("new", rid="3.1-c", camera="front_yard")
-    await send("new", rid="4.1-d")                          # forgotten, so it sounds again
-    assert sounds(calls) == ["default", "default", "none", "default"]
+async def test_cooldown_answers_only_for_its_own_automation_and_camera(hass, setup):
+    send, calls = await setup(cooldown=2)
+    answers = []
+    hass.bus.async_listen("frigate_review_notify_cooldown",
+                          lambda event: answers.append(event.data["cooling"]) if "cooling" in event.data else None)
+    await send("new", rid="1.1-a", settle=WAIT)
+    for key in ("automation.other/driveway", f"{AUTOMATION}/front_yard", f"{AUTOMATION}/driveway"):
+        hass.bus.async_fire("frigate_review_notify_cooldown", {"ask": key})
+        await asyncio.sleep(0.1)
+    assert answers == [f"{AUTOMATION}/driveway"]
 
 
-async def test_cooldown_without_a_helper_does_nothing(hass, setup):
-    send, calls = await setup(cooldown=60)
-    await send("new", rid="1.1-a")
-    await send("new", rid="2.1-b")
-    assert sounds(calls) == ["default", "default"]
-
-
-@pytest.mark.allow_warning("input_text.missing are missing")
-async def test_cooldown_with_a_missing_helper_does_nothing(hass, setup):
-    send, calls = await setup(cooldown=60, cooldown_store="input_text.missing")
-    await send("new", rid="1.1-a")
-    await send("new", rid="2.1-b")
+async def test_no_cooldown_means_no_waiting(hass, setup):
+    send, calls = await setup()
+    await send("new", rid="1.1-a", settle=0.05)
+    await send("new", rid="2.1-b", settle=0.05)
     assert sounds(calls) == ["default", "default"]
     assert hass.states.get(AUTOMATION).attributes["current"] == 0
 
 
-async def test_cooldown_survives_a_garbled_helper(hass, setup):
-    send, calls = await setup(cooldown=60, cooldown_store=STORE)
-    await hass.services.async_call("input_text", "set_value", {"entity_id": STORE, "value": "hello, :, driveway:x"}, blocking=True)
-    await send("new", rid="1.1-a")
-    await send("new", rid="2.1-b")
+async def test_leftover_helper_input_is_ignored(hass, setup):
+    """Automations written for the helper-based cooldown keep working."""
+    send, calls = await setup(cooldown=2, cooldown_store="input_text.frigate_cooldown")
+    await send("new", rid="1.1-a", settle=WAIT)
+    await send("new", rid="2.1-b", settle=WAIT)
     assert sounds(calls) == ["default", "none"]
-    assert hass.states.get(STORE).state.count(",") == 0
 
 
 async def test_extra_conditions(hass, setup):

@@ -1,5 +1,6 @@
 """Fixtures: a Home Assistant instance with the blueprint installed."""
 
+import asyncio
 import json
 import shutil
 from pathlib import Path
@@ -16,7 +17,6 @@ pytest_plugins = "pytest_homeassistant_custom_component"
 BLUEPRINT = Path(__file__).parent.parent / "frigate_review_notify.yaml"
 ALARM = "alarm_control_panel.house"
 TIMER = "timer.frigate_silence"
-STORE = "input_text.frigate_cooldown"
 
 AWAY = {
     "cameras": ["camera.driveway", "camera.front_yard"],
@@ -56,8 +56,6 @@ async def setup(hass, mqtt_mock):
     shutil.copy(BLUEPRINT, dest / BLUEPRINT.name)
 
     assert await async_setup_component(hass, "timer", {"timer": {"frigate_silence": {}}})
-    assert await async_setup_component(hass, "input_text", {"input_text": {
-        "frigate_cooldown": {"max": 255}, "short_cooldown": {"max": 30}}})
     hass.states.async_set(ALARM, "armed_away")
     for cam in ("driveway", "front_yard", "doorbell"):
         hass.states.async_set(f"camera.{cam}", "idle", {"camera_name": cam})
@@ -70,9 +68,14 @@ async def setup(hass, mqtt_mock):
         await hass.async_block_till_done()
         assert hass.states.get("automation.frigate_test") is not None
 
-        async def send(*args, **kwargs):
+        async def send(*args, settle=None, **kwargs):
+            """Publish a review message. A run holding a cooldown never settles, so
+            tests with a cooldown pass the time to wait instead."""
             async_fire_mqtt_message(hass, "frigate/reviews", review(*args, **kwargs))
-            await hass.async_block_till_done()
+            if settle is None:
+                await hass.async_block_till_done()
+            else:
+                await asyncio.sleep(settle)
 
         return send, calls
 

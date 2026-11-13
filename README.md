@@ -13,14 +13,14 @@ items to the Home Assistant Companion app.
 - **Silent updates of that same notification** when another wanted object joins, when
   Frigate publishes a GenAI summary, and optionally when the review ends.
 - **Per-camera cooldown** (optional): after an alert with sound, new reviews on that camera
-  arrive silently for a while. Other cameras still alert.
+  arrive silently for a while. Other cameras still alert. No helper needed.
 - **Silence button** (optional): mutes everything for a set time using a timer helper, so it
   survives a restart.
 - Filters for camera, review severity, object, the state of one entity (an alarm panel, a
   door sensor), and any extra conditions.
 
-Every MQTT message is handled on its own and nothing waits in the background, so the number
-of open reviews does not matter and a Home Assistant restart mid-review loses nothing.
+Every MQTT message is handled on its own, so the number of open reviews does not matter and
+a Home Assistant restart mid-review loses nothing.
 
 It has no TV, Telegram, zone, time-of-day or presence options. If you need those, use
 [SgtBatten's Frigate Notifications blueprint](https://github.com/SgtBatten/HA_blueprints),
@@ -42,8 +42,7 @@ which this one borrows its ideas and URL conventions from.
 2. Create an automation from it. Cameras, the notify action (for example
    `notify.mobile_app_my_phone` or a notify group) and your external URL are the only
    required fields.
-3. For the cooldown, create a **Text** helper (Settings → Devices & services → Helpers), set
-   its maximum length to 255, pick it under *Cooldown* and set the number of seconds.
+3. For the cooldown, set the number of seconds under *Cooldown*.
 4. For the silence button, create a **Timer** helper with *Restore* enabled and pick it
    under *Silence button*.
 
@@ -52,15 +51,19 @@ mode accepts.
 
 ## Cooldown
 
-The text helper holds the time of the last alert with sound for each camera that is still
-cooling down, for example `driveway:1763100000,front_yard:1763100020`.
+The cooldown is kept inside the automation. The run that sent an alert with sound stays
+alive until the cooldown for its camera ends, and a run about to alert asks whether one is
+active for its camera.
 
 - Reviews that start during the cooldown are still delivered, without sound (iOS: passive
   interruption level; Android: a low-importance "Frigate quiet" channel).
 - Silent deliveries and updates do not extend the cooldown.
-- If the helper is too short to hold every camera, the oldest entry is dropped and that
-  camera can sound again early. If the helper is missing, the cooldown does nothing.
-- Automations that use the same helper share the cooldown for a camera.
+- With a cooldown set, an alert with sound goes out 0.2 s later, the time allowed for an
+  answer.
+- While a camera is cooling down the automation shows one running instance for it.
+- Restarting Home Assistant or reloading the automation forgets running cooldowns, so the
+  next review sounds.
+- Each automation keeps its own cooldowns.
 
 ## Templates
 
