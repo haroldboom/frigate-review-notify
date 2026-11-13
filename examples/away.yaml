@@ -1,0 +1,21 @@
+alias: Camera notifications - away
+description: Person or car on the outdoor cameras while the alarm is armed
+use_blueprint:
+  path: haroldboom/frigate_review_notify.yaml
+  input:
+    cameras:
+      - camera.driveway
+      - camera.front_yard
+      - camera.backyard
+    notify_action: notify.all_phones
+    base_url: https://ha.example.org
+    labels:
+      - person
+      - car
+    state_entity: alarm_control_panel.house
+    state_values:
+      - armed_away
+      - armed_home
+    cooldown: 60
+    cooldown_store: input_text.frigate_cooldown
+    silence_timer: timer.frigate_silence

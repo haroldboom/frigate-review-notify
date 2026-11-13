@@ -1,0 +1,438 @@
+blueprint:
+  name: Frigate Review Notifications (lean)
+  domain: automation
+  author: haroldboom
+  source_url: https://github.com/haroldboom/frigate-review-notify/blob/main/frigate_review_notify.yaml
+  homeassistant:
+    min_version: 2024.10.0
+  description: |
+    Phone notifications for Frigate review items, for the Home Assistant Companion app.
+
+    One alert with sound when a review first matches your filters, then silent updates
+    of the same notification (new object type, review end, GenAI summary). An optional
+    per-camera cooldown keeps a busy camera from sounding over and over.
+    Each MQTT message is handled on its own, so nothing waits in the background and a
+    Home Assistant restart mid-review loses nothing.
+
+    Needs Frigate 0.14+, the Frigate integration with the unauthenticated notification
+    proxy enabled, and MQTT.
+  input:
+    cameras:
+      name: Cameras
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - integration: frigate
+              domain: camera
+    notify_action:
+      name: Notify action
+      description: The notify action to call, e.g. `notify.all_phones` or `notify.mobile_app_iphone`.
+      selector:
+        text: {}
+    base_url:
+      name: Base URL
+      description: External URL of Home Assistant, used for the images and clip links.
+      selector:
+        text: {}
+    filters:
+      name: Filters
+      icon: mdi:filter
+      input:
+        severities:
+          name: Review severity
+          default:
+            - alert
+            - detection
+          selector:
+            select:
+              multiple: true
+              options:
+                - label: Alerts
+                  value: alert
+                - label: Detections
+                  value: detection
+        labels:
+          name: Objects
+          description: Only notify for these objects. Leave empty for any object.
+          default: []
+          selector:
+            select:
+              multiple: true
+              custom_value: true
+              options:
+                - person
+                - car
+                - dog
+                - cat
+                - package
+                - bicycle
+                - motorcycle
+        state_entity:
+          name: State entity (optional)
+          description: Only notify while this entity is in one of the states below.
+          default: ""
+          selector:
+            entity: {}
+        state_values:
+          name: States
+          default: []
+          selector:
+            select:
+              multiple: true
+              custom_value: true
+              options:
+                - armed_away
+                - armed_home
+                - armed_night
+                - "on"
+                - "off"
+                - home
+                - not_home
+                - unavailable
+                - unknown
+        extra_conditions:
+          name: Extra conditions (optional)
+          default: []
+          selector:
+            condition: {}
+    content:
+      name: Notification
+      icon: mdi:message-image
+      description: >-
+        Text fields accept templates. Available: `camera`, `camera_name`, `label`,
+        `sub_labels`, `id` (first detection), `review_id`, `base_url`, `client_id`,
+        and for the GenAI title `genai_title`, `genai_threat_level`.
+      input:
+        title:
+          name: Title
+          default: "{{ camera_name }}"
+          selector:
+            text: {}
+        message:
+          name: Message
+          default: "A {{ label }} was detected on the {{ camera_name }} camera."
+          selector:
+            text: {}
+        image:
+          name: Image for the alert
+          default: "{{base_url}}/api/frigate{{client_id}}/notifications/{{id}}/snapshot.jpg?crop=1"
+          selector:
+            text: {}
+        update_image:
+          name: Image for silent updates
+          description: Leave empty to keep the alert image.
+          default: "{{base_url}}/api/frigate{{client_id}}/notifications/{{review_id}}/review_preview.gif"
+          selector:
+            text: {}
+        tap_action:
+          name: Tap action
+          description: URL or dashboard path opened when the notification is tapped.
+          default: "{{base_url}}/api/frigate{{client_id}}/notifications/{{id}}/{{camera}}/clip.mp4"
+          selector:
+            text: {}
+        clip_url:
+          name: View Clip button URL
+          default: "{{base_url}}/api/frigate{{client_id}}/notifications/{{id}}/{{camera}}/clip.mp4"
+          selector:
+            text: {}
+    updates:
+      name: Updates
+      icon: mdi:update
+      collapsed: true
+      input:
+        genai_summary:
+          name: GenAI summary
+          description: When Frigate publishes a review summary, silently replace the notification text with it.
+          default: true
+          selector:
+            boolean: {}
+        genai_title:
+          name: GenAI title
+          default: "{{ 'Security Concern: ' if genai_threat_level == 2 else 'Needs Review: ' if genai_threat_level == 1 else '' }}{{ genai_title }}"
+          selector:
+            text: {}
+        end_update:
+          name: Update when the review ends
+          description: Silently refresh the notification (with the update image) when the review ends.
+          default: false
+          selector:
+            boolean: {}
+    cooldown:
+      name: Cooldown
+      icon: mdi:timer-sand
+      collapsed: true
+      input:
+        cooldown:
+          name: Cooldown per camera
+          description: >-
+            After an alert with sound, new reviews on the same camera arrive silently
+            for this long. Other cameras are not affected. 0 turns it off. Needs the
+            text helper below.
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 3600
+              unit_of_measurement: s
+              mode: box
+        cooldown_store:
+          name: Cooldown text helper
+          description: >-
+            A Text helper (input_text) that remembers when each camera last alerted. Set
+            its maximum length to 255. Automations that share a helper share the cooldown.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_text
+    silence:
+      name: Silence button
+      icon: mdi:bell-off
+      collapsed: true
+      input:
+        silence_timer:
+          name: Silence timer (optional)
+          description: >-
+            A timer helper. When set, notifications get a "Silence" button that starts it,
+            and nothing is sent while it runs. Enable "Restore" on the timer so it survives
+            restarts. Share one timer between automations to silence them together.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: timer
+        silence_minutes:
+          name: Silence duration
+          default: 30
+          selector:
+            number:
+              min: 1
+              max: 720
+              unit_of_measurement: min
+    advanced:
+      name: Advanced
+      icon: mdi:cog
+      collapsed: true
+      input:
+        mqtt_topic:
+          name: MQTT topic
+          default: frigate/reviews
+          selector:
+            text: {}
+        client_id:
+          name: Frigate client ID
+          description: Only needed with more than one Frigate instance.
+          default: ""
+          selector:
+            text: {}
+
+mode: queued
+max: 20
+max_exceeded: silent
+trace:
+  stored_traces: 20
+
+trigger_variables:
+  severities: !input severities
+  silence_timer: !input silence_timer
+
+triggers:
+  # One trigger per severity so that messages of an unselected severity never
+  # start a run (value_template cannot see trigger_variables, payload can't list).
+  - trigger: mqtt
+    topic: !input mqtt_topic
+    value_template: "{{ value_json['after']['severity'] }}"
+    payload: alert
+    enabled: "{{ 'alert' in severities }}"
+    id: review
+  - trigger: mqtt
+    topic: !input mqtt_topic
+    value_template: "{{ value_json['after']['severity'] }}"
+    payload: detection
+    enabled: "{{ 'detection' in severities }}"
+    id: review
+  - trigger: event
+    event_type: mobile_app_notification_action
+    event_data:
+      action: "silence-{{ silence_timer }}"
+    enabled: "{{ silence_timer | length > 0 }}"
+    id: silence
+
+variables:
+  input_cameras: !input cameras
+  input_labels: !input labels
+  input_states: !input state_values
+  state_entity: !input state_entity
+  silence_minutes: !input silence_minutes
+  genai_summary: !input genai_summary
+  end_update: !input end_update
+  is_review: "{{ trigger.id == 'review' }}"
+  type: "{{ trigger.payload_json['type'] if is_review else '' }}"
+  camera: "{{ trigger.payload_json['after']['camera'] if is_review else '' }}"
+  camera_names: >-
+    {% set ns = namespace(names=[]) %}
+    {% for entity in ([input_cameras] if input_cameras is string else input_cameras) %}
+      {% set ns.names = ns.names + [state_attr(entity, 'camera_name') or entity.split('.')[1]] %}
+    {% endfor %}
+    {{ ns.names }}
+  wanted: "{{ input_labels | map('lower') | list }}"
+  state_values: "{{ input_states | map('lower') | list }}"
+  # Frigate renames an object to "<label>-verified" once it has a sub label
+  objects: "{{ trigger.payload_json['after']['data']['objects'] | map('regex_replace', '-verified$', '') | unique | list if is_review else [] }}"
+  objects_before: >-
+    {% set before = (trigger.payload_json.get('before') or {}) if is_review else {} %}
+    {{ (before.get('data') or {}).get('objects', []) | map('regex_replace', '-verified$', '') | unique | list }}
+  matched: "{{ objects | select('in', wanted) | list if wanted else objects }}"
+  matched_before: "{{ objects_before | select('in', wanted) | list if wanted else objects_before }}"
+  passes: "{{ is_review and (not wanted or matched | count > 0) }}"
+  # A "new" message has nothing before it; otherwise compare with the previous state
+  passed_before: >-
+    {{ is_review and type != 'new'
+       and (trigger.payload_json.get('before') or {}).get('severity') in severities
+       and (not wanted or matched_before | count > 0) }}
+  # alert = first time this review matches (sound); the rest are silent updates
+  kind: >-
+    {%- if not passes -%} none
+    {%- elif not passed_before and type in ['new', 'update', 'end'] -%} alert
+    {%- elif type == 'update' and matched | sort != matched_before | sort -%} update
+    {%- elif type == 'end' and end_update -%} end
+    {%- elif type == 'genai' and genai_summary -%} summary
+    {%- else -%} none
+    {%- endif -%}
+
+conditions:
+  - condition: or
+    conditions:
+      - condition: trigger
+        id: silence
+      - condition: and
+        conditions:
+          - alias: Something to send
+            condition: template
+            value_template: "{{ kind != 'none' }}"
+          - alias: Camera selected
+            condition: template
+            value_template: "{{ camera in camera_names }}"
+          - alias: State filter
+            condition: template
+            value_template: "{{ not state_entity or states(state_entity) | lower in state_values }}"
+          - alias: Not silenced
+            condition: template
+            value_template: "{{ not silence_timer or not is_state(silence_timer, 'active') }}"
+          - alias: Extra conditions
+            condition: and
+            conditions: !input extra_conditions
+
+actions:
+  - choose:
+      - alias: Silence button pressed
+        conditions:
+          - condition: trigger
+            id: silence
+        sequence:
+          - action: timer.start
+            target:
+              entity_id: "{{ silence_timer }}"
+            data:
+              duration: "{{ silence_minutes | int * 60 }}"
+    default:
+      - variables:
+          input_base_url: !input base_url
+          base_url: "{{ input_base_url.rstrip('/') }}"
+          input_client_id: !input client_id
+          client_id: "{{ input_client_id if not input_client_id or '/' in input_client_id else '/' + input_client_id }}"
+          notify_input: !input notify_action
+          notify_action: "{{ notify_input if notify_input.startswith('notify.') else 'notify.' + notify_input }}"
+          review_id: "{{ trigger.payload_json['after']['id'] }}"
+          id: "{{ trigger.payload_json['after']['data']['detections'] | first | default('') }}"
+          sub_labels: "{{ trigger.payload_json['after']['data']['sub_labels'] | default([]) }}"
+          camera_name: "{{ camera | replace('_', ' ') | title }}"
+          label: "{{ matched | map('replace', '_', ' ') | map('title') | join(', ') or 'Activity' }}"
+          genai_title: >-
+            {% set meta = trigger.payload_json['after']['data'].get('metadata') or {} %}
+            {{ meta.get('title') or '' }}
+          genai_text: >-
+            {% set meta = trigger.payload_json['after']['data'].get('metadata') or {} %}
+            {{ meta.get('shortSummary') or meta.get('scene') or '' }}
+          genai_threat_level: >-
+            {% set meta = trigger.payload_json['after']['data'].get('metadata') or {} %}
+            {{ meta.get('potential_threat_level') | int(0) }}
+          cooldown: !input cooldown
+          cooldown_store: !input cooldown_store
+          # Cameras still cooling down, as "camera:time of the alert" (newest first)
+          cooling: >-
+            {% set ns = namespace(items=[]) %}
+            {% if cooldown | int > 0 and cooldown_store %}
+              {% for item in states(cooldown_store).split(',') %}
+                {% set age = now().timestamp() - item.split(':')[1] | default(0) | int(0) %}
+                {% if 0 <= age < cooldown | int %}
+                  {% set ns.items = ns.items + [item] %}
+                {% endif %}
+              {% endfor %}
+            {% endif %}
+            {{ ns.items }}
+          cooled: "{{ kind == 'alert' and cooling | select('match', camera ~ ':') | list | count > 0 }}"
+          silent: "{{ kind != 'alert' or cooled }}"
+          summary: "{{ kind == 'summary' and genai_text | string | trim | length > 0 }}"
+          title_default: !input title
+          title_genai: !input genai_title
+          title: "{{ title_genai if summary and title_genai | string | trim else title_default }}"
+          message_default: !input message
+          message: "{{ genai_text if summary else message_default }}"
+          image_alert: !input image
+          image_update: !input update_image
+          image: "{{ image_update if kind != 'alert' and image_update | trim else image_alert }}"
+          tap_action: !input tap_action
+          clip_url: !input clip_url
+          buttons: >-
+            {% set buttons = [
+              {'action': 'URI', 'title': 'View Clip', 'uri': clip_url},
+              {'action': 'URI', 'title': 'View Snapshot', 'uri': base_url ~ '/api/frigate' ~ client_id ~ '/notifications/' ~ id ~ '/snapshot.jpg'}] %}
+            {% if silence_timer %}
+              {% set buttons = buttons + [{'action': 'silence-' ~ silence_timer, 'title': 'Silence ' ~ silence_minutes | int ~ ' min', 'destructive': true}] %}
+            {% endif %}
+            {{ buttons }}
+      - action: "{{ notify_action }}"
+        data:
+          title: "{{ title }}"
+          message: "{{ message }}"
+          data:
+            tag: "frigate-{{ review_id }}"
+            group: "frigate-{{ camera }}"
+            actions: "{{ buttons }}"
+            # iOS
+            url: "{{ tap_action }}"
+            attachment:
+              url: "{{ image }}"
+              content-type: "{{ 'gif' if '.gif' in image else 'jpeg' }}"
+            push:
+              sound: "{{ 'none' if silent else 'default' }}"
+              interruption-level: "{{ 'passive' if silent else 'active' }}"
+            # Android
+            image: "{{ image }}"
+            clickAction: "{{ tap_action }}"
+            ttl: 0
+            priority: high
+            alert_once: true
+            # A cooled-down alert is a new notification, so alert_once can't quieten it
+            channel: "{{ 'Frigate quiet' if cooled else '' }}"
+            importance: "{{ 'low' if cooled else '' }}"
+      - alias: Start the cooldown for this camera
+        if:
+          - condition: template
+            value_template: "{{ kind == 'alert' and not cooled and cooldown | int > 0 and cooldown_store | length > 0 }}"
+        then:
+          - action: input_text.set_value
+            target:
+              entity_id: "{{ cooldown_store }}"
+            data:
+              # Drop the oldest entries if the helper is too short to hold them all
+              value: >-
+                {% set ns = namespace(items=[]) %}
+                {% for item in [camera ~ ':' ~ now().timestamp() | int] + cooling %}
+                  {% if (ns.items + [item]) | join(',') | length <= state_attr(cooldown_store, 'max') | int(100) %}
+                    {% set ns.items = ns.items + [item] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.items | join(',') }}
